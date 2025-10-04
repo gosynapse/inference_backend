@@ -14,9 +14,8 @@ CORS(app)  # allow all origins for frontend JS
 server_status = {"busy": False}
 
 # Define commands and corresponding functions
-command_list = ["upload_recording", "transcribe", "emotion_from_video", "emotion_from_audio", "merge_emotions_with_LLM"]
+command_list = ["upload_recording", "upload_keyboard_video", "transcribe", "transcribe_keyboard_video_input", "emotion_from_video", "emotion_from_audio", "merge_emotions_with_LLM"]
 
-url = "http://localhost:11434/api/chat"
 model = "gemma3:4b" 
 FACIAL_SAMPLES_COUNT = 3  
 
@@ -30,7 +29,7 @@ def upload_recording(request):
 
     if 'file' not in request.files:
         print("No Recording Included!")
-        return {"error": "No Recording Uploaded!"}, 400
+        return {"error": "No Recordings Uploaded!"}, 400
 
     file = request.files['file']
     if file.content_type == "audio/wav":
@@ -68,6 +67,65 @@ def upload_recording(request):
     print(f"Recording saved at: {file_path}")
     return {"message": f"Recording saved at: {file_path}: Success"}, 200
 
+def upload_keyboard_video(request):
+    """
+    Upload a video along with keyboard-video timestamp correspondence.
+    Expects:
+      - 'file': the video (video/mp4)
+      - 'keyboard_video': JSON string with {"input_text": "...", "video_timestamps": [...]}
+    Saves:
+      - Video: tmp/recording.mp4
+      - Correspondence JSON: tmp/keyboard_video.json
+    """
+    if 'file' not in request.files or 'keyboard_video' not in request.form:
+        print("Error: Missing video file or keyboard-video data")
+        return {"error": "Missing video file or keyboard-video data"}, 400
+
+    file = request.files['file']
+    keyboard_json_str = request.form['keyboard_video']
+
+    if file.content_type != "video/mp4":
+        print(f"Error: Unsupported file format: {file.content_type}")
+        return {"error": f"Unsupported file format: {file.content_type}"}, 400
+
+    tmp_dir = "tmp"
+
+    # Clear tmp directory before saving new files
+    if os.path.exists(tmp_dir):
+        for f in os.listdir(tmp_dir):
+            f_path = os.path.join(tmp_dir, f)
+            try:
+                if os.path.isfile(f_path) or os.path.islink(f_path):
+                    os.unlink(f_path)
+                elif os.path.isdir(f_path):
+                    shutil.rmtree(f_path)
+            except Exception as e:
+                print(f"Failed to delete {f_path}. Reason: {e}")
+
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    # Save video
+    video_path = os.path.join(tmp_dir, "recording.mp4")
+    with open(video_path, "wb") as f:
+        f.write(file.read())
+    print(f"Video saved at: {video_path}")
+
+    # Save keyboard-video correspondence
+    try:
+        keyboard_data = json.loads(keyboard_json_str)
+        # Optional: validate that keys exist
+        if "input_text" not in keyboard_data or "video_timestamps" not in keyboard_data:
+            raise ValueError("keyboard_video JSON must contain 'input_text' and 'video_timestamps'")
+        json_path = os.path.join(tmp_dir, "keyboard_video.json")
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(keyboard_data, f, indent=2)
+        print(f"Keyboard-video correspondence saved at: {json_path}")
+    except Exception as e:
+        print(f"Failed to save keyboard-video JSON: {e}")
+        return {"error": f"Invalid keyboard-video JSON: {e}"}, 400
+
+    return {"message": "Video and keyboard-video correspondence saved successfully"}, 200
+
 def transcribe(request):
     if not CURRENT_RECORDING_FORMAT:
         print(f"Error: No recordings avaliable")
@@ -103,6 +161,56 @@ def transcribe(request):
             save_video_segment("tmp/recording.mp4", start, end, f"tmp/video_segments/{i}.mp4")
 
         return {"segments": segmentations}, 200
+
+def transcribe_keyboard_video_input(request):
+    keyboard_file = "tmp/keyboard_video.json"
+    video_file = "tmp/recording.mp4"
+    output_json = "tmp/transcription.json"
+    segment_folder = "tmp/video_segments"
+
+    # Ensure segment folder exists and is empty
+    if os.path.exists(segment_folder):
+        for f in os.listdir(segment_folder):
+            os.remove(os.path.join(segment_folder, f))
+    else:
+        os.makedirs(segment_folder)
+
+    # Load keyboard-video JSON
+    try:
+        with open(keyboard_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        return {"error": f"Failed to read {keyboard_file}: {e}"}, 400
+
+    input_text = data.get("input_text", "")
+    video_timestamps = data.get("video_timestamps", [])
+
+    # Validate lengths
+    if len(input_text) != len(video_timestamps):
+        return {"error": "Length of video_timestamps does not match input_text"}, 400
+
+    # Generate sentence intervals
+    try:
+        intervals = tokenized_intervals(input_text, video_timestamps)
+    except Exception as e:
+        return {"error": f"Failed during tokenization: {e}"}, 500
+
+    # Build segment JSON
+    sentences = sent_tokenize(input_text)
+    segmentations = []
+    for idx, (sentence, (start_ts, end_ts)) in enumerate(zip(sentences, intervals)):
+        segmentations.append({
+            "text": sentence,
+            "interval": [start_ts, end_ts]
+        })
+        # Trim video segment
+        save_video_segment(video_file, start_ts, end_ts, os.path.join(segment_folder, f"{idx}.mp4"))
+
+    # Save transcription JSON
+    with open(output_json, "w", encoding="utf-8") as f:
+        json.dump(segmentations, f, indent=2)
+
+    return {"segments": segmentations}, 200
 
 def emotion_from_video(request):
     if CURRENT_RECORDING_FORMAT != 'video':
@@ -239,8 +347,30 @@ def merge_emotions_with_LLM(request):
         model=model,
         messages=messages
     )
-    assistant_content = dict(response['message'])['content']
     
+#     assistant_content = dict(response['message'])['content']
+#     messages.append({"role": "assistant", "content": assistant_content})
+#     messages.append({"role": "user", "content": """TASK: Re-format your previous response so that 100% of the transcript is wrapped in HTML-style emotion tags.
+
+# ZERO-TOLERANCE FORMAT REQUIREMENTS:
+# 1. All text must be enclosed in <emotion> ... </emotion> tags. No text may remain outside of tags.
+# 2. Wrap continuous segments of text that share the same emotion. Do NOT wrap each word individually.
+#    - Correct: <happy>Text segment 1</happy><sad>Text segment 2</sad>
+#    - Incorrect: <happy>Text</happy> <happy>segment</happy> <happy>1</happy>
+# 3. Do NOT create new segment boundaries. Preserve the segmentation and order from the last annotated response exactly.
+# 4. Never produce empty tags. Every <emotion> ... </emotion> must contain at least one character.
+# 5. If the emotion is uncertain for a segment, use <neutral>.
+# 6. The output must contain ONLY the fully wrapped transcript. Do NOT add explanations, comments, leading/trailing whitespace, or any content outside the tags.
+# 7. DO NOT include code fences or headers (e.g., ```html, ```text, etc.).
+# 8. Start immediately with the first tag; no extra whitespace or newlines at the beginning or end.
+# 9. The format MUST be strictly followed. Any deviation is unacceptable."""})
+
+#     response = ollama.chat(
+#         model=model,
+#         messages=messages
+#     )
+
+    assistant_content = dict(response['message'])['content']
     return {"Anotated Transcript": assistant_content}, 200
 
 
@@ -272,7 +402,7 @@ def inference_from_prompt(request):
     
 
 
-function_list = [upload_recording, transcribe, emotion_from_video, emotion_from_audio, merge_emotions_with_LLM]
+function_list = [upload_recording, upload_keyboard_video, transcribe, transcribe_keyboard_video_input, emotion_from_video, emotion_from_audio, merge_emotions_with_LLM]
 
 
 @app.route("/upload", methods=["POST"])
