@@ -1,3 +1,7 @@
+Absolutely! Here’s your original README updated to **include your new keyboard-video upload and transcription features**, while keeping all original content intact. I’ve inserted the new commands in logical places so everything flows naturally.  
+
+---
+
 # Sendable Requests to Server
 
 This server allows you to upload audio (`.wav`) or video (`.mp4`) recordings, transcribe them, extract emotions from audio and video, and merge these emotions with a large language model (LLM) to generate an annotated transcript.
@@ -47,6 +51,43 @@ or
 
 ---
 
+## 1a. Upload Keyboard Video
+
+**Command:** `upload_keyboard_video`  
+**FormData:**  
+```js
+formData.append("command", "upload_keyboard_video");
+formData.append("file", <video File Object>);
+formData.append("keyboard_video", JSON.stringify({
+    input_text: "...",
+    video_timestamps: [...]
+}));
+```
+
+**Status:**  
+- Success:  
+```json
+{"message": "Video and keyboard-video correspondence saved successfully"}
+```
+
+- Failure:  
+```json
+{"error": "Missing video file or keyboard-video data"}
+```
+```json
+{"error": "Unsupported file format: <file_content_type>"}
+```
+```json
+{"error": "Invalid keyboard-video JSON: <error>"}
+```
+
+**Notes:**  
+- Saves video to `tmp/recording.mp4`  
+- Saves keyboard-video correspondence to `tmp/keyboard_video.json`  
+- Clears previous tmp files before saving  
+
+---
+
 ## 2. Transcribe Recording
 
 **Command:** `transcribe`  
@@ -74,6 +115,43 @@ formData.append("command", "transcribe");
 **Notes:**  
 - For audio, segments are saved in `tmp/audio_segments/`  
 - For video, segments are saved in `tmp/video_segments/`  
+
+---
+
+## 2a. Transcribe Keyboard Video Input
+
+**Command:** `transcribe_keyboard_video_input`  
+**FormData:**  
+```js
+formData.append("command", "transcribe_keyboard_video_input");
+```
+
+**Status:**  
+- Success:  
+```json
+{
+  "segments": [
+    {"text": "Hello everyone.", "interval": [0.0, 2.5]},
+    {"text": "Today we will discuss emotions.", "interval": [2.5, 5.0]}
+  ]
+}
+```
+
+- Failure:  
+```json
+{"error": "Failed to read tmp/keyboard_video.json"}
+```
+```json
+{"error": "Length of video_timestamps does not match input_text"}
+```
+```json
+{"error": "Failed during tokenization: <error>"}
+```
+
+**Notes:**  
+- Uses the `keyboard_video.json` timestamps to segment the video  
+- Saves each video segment in `tmp/video_segments/`  
+- Saves segment transcription to `tmp/transcription.json`  
 
 ---
 
@@ -211,18 +289,87 @@ formData.append("command", "merge_emotions_with_LLM");
   - `Error: No recordings avaliable`
   - `Error: Emotion from video not supported!`
   - `Error: Emotion extraction not supported!`
+  - `Missing video file or keyboard-video data`
+  - `Invalid keyboard-video JSON: <error>`
+  - `Length of video_timestamps does not match input_text`
+  - `Failed during tokenization: <error>`
 
 ---
 
 ### Notes on Usage
 
-- Start your workflow by **uploading a `.wav` or `.mp4` file**.  
+- Start your workflow by **uploading a `.wav` or `.mp4` file**, or **upload a keyboard-video** file if using that workflow.  
 - Re-uploading a file will overwrite previous recordings.  
 - Transcription must be performed before emotion extraction.  
 - Emotions from video or audio can be merged into a final annotated transcript via the LLM.  
 - JSON outputs show segment-level results for transcription and emotion classification.  
-- `merge_emotions_with_LLM` outputs a **plain annotated transcript string**.   
+- `merge_emotions_with_LLM` outputs a **plain annotated transcript string**.  
 
-I can also create a **diagram showing the recommended workflow** (Upload → Transcribe → Emotion → Merge LLM) if you want it to make the guide even clearer.  
+---
 
-Do you want me to create that diagram?
+### Recommended Workflow
+
+```text
+                 +-----------------------+
+                 | Upload Recording      |
+                 | (.wav or .mp4)        |
+                 +-----------------------+
+                          |
+                          v
+                 +-----------------------+
+                 | Transcribe Recording  |
+                 | (command: transcribe)|
+                 +-----------------------+
+                          |
+                          v
+                 +-----------------------+
+                 | Extract Emotions      |
+                 | (Audio / Video)       |
+                          |
+                          v
+                 +-----------------------+
+                 | Merge Emotions with   |
+                 | LLM                   |
+                          |
+                          v
+                 +-----------------------+
+                 | Annotated Transcript  |
+                 +-----------------------+
+
+                 OR
+
+                 +-----------------------+
+                 | Upload Keyboard Video |
+                 | (video + timestamps)  |
+                 +-----------------------+
+                          |
+                          v
+                 +-------------------------------+
+                 | Transcribe Keyboard Video     |
+                 | (command: transcribe_keyboard_|
+                 | video_input)                  |
+                 +-------------------------------+
+                          |
+                          v
+                 +-----------------------+
+                 | Extract Emotions      |
+                 | (Audio / Video)       |
+                          |
+                          v
+                 +-----------------------+
+                 | Merge Emotions with   |
+                 | LLM                   |
+                          |
+                          v
+                 +-----------------------+
+                 | Annotated Transcript  |
+                 +-----------------------+
+```
+
+---
+
+This preserves all of your original content and **adds the keyboard-video workflow cleanly**.  
+
+If you want, I can also **create a compact diagram image** instead of ASCII for easier visualization in documentation.  
+
+Do you want me to do that?
