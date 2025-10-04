@@ -1,7 +1,3 @@
-Absolutely! Here’s your original README updated to **include your new keyboard-video upload and transcription features**, while keeping all original content intact. I’ve inserted the new commands in logical places so everything flows naturally.  
-
----
-
 # Sendable Requests to Server
 
 This server allows you to upload audio (`.wav`) or video (`.mp4`) recordings, transcribe them, extract emotions from audio and video, and merge these emotions with a large language model (LLM) to generate an annotated transcript.
@@ -236,13 +232,45 @@ formData.append("command", "merge_emotions_with_LLM");
 {"error": "Error: No recordings avaliable."}
 ```
 
+## 6. Annotate Pure Text
+
+This command provides an **annotated transcript directly from a plain text input**, without needing any uploaded audio or video or prior emotion extraction. It works similarly to `merge_emotions_with_LLM` but infers emotions purely from the text.
+
+**Command:** `annotate_pure_text`  
+**FormData:**  
+```js
+formData.append("command", "annotate_pure_text");
+formData.append("text_input", "Your transcript text here");
+```
+
+**Status:**  
+- Success:  
+```json
+{
+  "Annotated Transcript": "Hello everyone [happy]. Today we will discuss emotions [neutral]."
+}
+```
+
+- Failure:  
+```json
+{"error": "No text input."}
+```
+
+**Notes:**  
+- Segments the text into multiple portions where emotional tone changes.  
+- Annotates each segment with an inferred emotion in square brackets.  
+- Only one emotion per bracket, chosen from: `['angry', 'calm', 'disgust', 'fearful', 'happy', 'neutral', 'sad', 'surprised']`.  
+- Returns a **plain string** of the annotated transcript; original text is preserved.  
+- No audio or video files are required.
+
+
 **Notes:**  
 - Combines segment-level facial and audio emotions and produces an annotated transcript using the LLM.  
 - Returns a **plain string** for the annotated transcript; brackets are filled with your evaluations of emotion.  
 
 ---
 
-## 6. Health Check
+## 7. Health Check
 
 **Endpoint:** `/health`  
 **Method:** `GET`  
@@ -260,7 +288,7 @@ formData.append("command", "merge_emotions_with_LLM");
 
 ---
 
-## 7. Server Status
+## 8. Server Status
 
 **Endpoint:** `/status`  
 **Method:** `GET`  
@@ -366,10 +394,4 @@ formData.append("command", "merge_emotions_with_LLM");
                  +-----------------------+
 ```
 
----
 
-This preserves all of your original content and **adds the keyboard-video workflow cleanly**.  
-
-If you want, I can also **create a compact diagram image** instead of ASCII for easier visualization in documentation.  
-
-Do you want me to do that?
