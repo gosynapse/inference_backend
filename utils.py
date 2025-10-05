@@ -103,9 +103,9 @@ def merge_emotions_with_transcriptions(segment_file, transcription_file):
         else:
             parts = []
             if facial_emotion is not None:
-                parts.append(f"facial: {facial_emotion}")
+                parts.append(f"{facial_emotion}")
             if audio_emotion is not None:
-                parts.append(f"audio: {audio_emotion}")
+                parts.append(f"{audio_emotion}")
             emotion_str = f"[{', '.join(parts)}]"
         
         merged_text.append(f"{text}{emotion_str}")
