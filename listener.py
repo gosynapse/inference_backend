@@ -1,11 +1,23 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from flask import send_file
+from flask import url_for
 import os
 import json
+import time
 from models import *
 import requests
 import shutil
 import ollama
+from moviepy.editor import AudioFileClip
+from moviepy.editor import VideoFileClip
+from pydub import AudioSegment
+import subprocess
+from eleven_labs import *
+from dotenv import load_dotenv
+from supabase import create_client
+
+
 
 app = Flask(__name__)
 CORS(app)  # allow all origins for frontend JS
@@ -14,13 +26,21 @@ CORS(app)  # allow all origins for frontend JS
 server_status = {"busy": False}
 
 # Define commands and corresponding functions
-command_list = ["upload_recording", "upload_keyboard_video", "transcribe", "transcribe_keyboard_video_input", "emotion_from_video", "emotion_from_audio", "merge_emotions_with_LLM"]
+command_list = ["upload_recording", "upload_keyboard_video", "transcribe", "transcribe_keyboard_video_input", "emotion_from_video", "emotion_from_audio", "merge_emotions_with_LLM", "annotate_pure_text", "generate_11labs_voice", "generate_11labs_text_to_speech"]
 
-model = "gemma3:4b" 
+model = "gemma3:4b-it-q8_0" 
 FACIAL_SAMPLES_COUNT = 3  
 
 # Global Varibles
 CURRENT_RECORDING_FORMAT = False
+
+load_dotenv()
+
+SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
+
+# Initialize Supabase client
+supabase = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 
 
@@ -32,21 +52,9 @@ def upload_recording(request):
         return {"error": "No Recordings Uploaded!"}, 400
 
     file = request.files['file']
-    if file.content_type == "audio/wav":
-        CURRENT_RECORDING_FORMAT = 'audio'
-        filename = "recording.wav"
-    elif file.content_type == "video/mp4":
-        CURRENT_RECORDING_FORMAT = 'video'
-        filename = "recording.mp4"
-    else:
-        CURRENT_RECORDING_FORMAT = False
-        print(f"Error: Unsupported file format: {file.content_type}")
-        return {"error": f"Unsupported file format: {file.content_type}"}, 400
 
-    file_path = os.path.join("tmp", filename)
-
-    # Clear tmp directory before saving new file
     tmp_dir = "tmp"
+    # Clear tmp directory before saving new file
     if os.path.exists(tmp_dir):
         for f in os.listdir(tmp_dir):
             f_path = os.path.join(tmp_dir, f)
@@ -57,21 +65,52 @@ def upload_recording(request):
                     shutil.rmtree(f_path)
             except Exception as e:
                 print(f"Failed to delete {f_path}. Reason: {e}")
-
-    # Ensure tmp directory exists
     os.makedirs(tmp_dir, exist_ok=True)
 
-    with open(file_path, "wb") as f:
-        f.write(file.read())
+    # Handle audio/webm
+    if file.content_type == "audio/webm":
+        CURRENT_RECORDING_FORMAT = 'audio'
+        # Save the uploaded webm temporarily
+        tmp_webm_path = os.path.join(tmp_dir, "recording.webm")
+        with open(tmp_webm_path, "wb") as f:
+            f.write(file.read())
 
-    print(f"Recording saved at: {file_path}")
-    return {"message": f"Recording saved at: {file_path}: Success"}, 200
+        # Convert to WAV 16kHz
+        wav_path = os.path.join(tmp_dir, "recording.wav")
+        try:
+            audio = AudioSegment.from_file(tmp_webm_path, format="webm")
+            audio = audio.set_frame_rate(16000).set_channels(1)  # mono 16kHz
+            audio.export(wav_path, format="wav")
+        except Exception as e:
+            print(f"Failed to convert webm to wav: {e}")
+            return {"error": f"Failed to convert audio: {e}"}, 500
+
+        print(f"Audio saved at: {wav_path}")
+        return {"message": f"Recording saved at: {wav_path}: Success"}, 200
+
+    # Handle video/webm
+    elif file.content_type == "video/webm":
+        CURRENT_RECORDING_FORMAT = 'video'
+        file_path = os.path.join(tmp_dir, "recording.webm")
+        with open(file_path, "wb") as f:
+            f.write(file.read())
+        print(f"Video saved at: {file_path}")
+        return {"message": f"Recording saved at: {file_path}: Success"}, 200
+
+    else:
+        CURRENT_RECORDING_FORMAT = False
+        print(f"Error: Unsupported file format: {file.content_type}")
+        return {"error": f"Unsupported file format: {file.content_type}"}, 400
+
+
+    
 
 def upload_keyboard_video(request):
     """
-    Upload a video along with keyboard-video timestamp correspondence.
+    Upload a video in WEBM format along with keyboard-video timestamp correspondence.
+    Converts the video to MP4 using ffmpeg and saves both the video and correspondence JSON.
     Expects:
-      - 'file': the video (video/mp4)
+      - 'file': the video (video/webm)
       - 'keyboard_video': JSON string with {"input_text": "...", "video_timestamps": [...]}
     Saves:
       - Video: tmp/recording.mp4
@@ -84,13 +123,13 @@ def upload_keyboard_video(request):
     file = request.files['file']
     keyboard_json_str = request.form['keyboard_video']
 
-    if file.content_type != "video/mp4":
+    if file.content_type != "video/webm":
         print(f"Error: Unsupported file format: {file.content_type}")
         return {"error": f"Unsupported file format: {file.content_type}"}, 400
 
     tmp_dir = "tmp"
 
-    # Clear tmp directory before saving new files
+    # Clear tmp directory before saving new file
     if os.path.exists(tmp_dir):
         for f in os.listdir(tmp_dir):
             f_path = os.path.join(tmp_dir, f)
@@ -101,19 +140,34 @@ def upload_keyboard_video(request):
                     shutil.rmtree(f_path)
             except Exception as e:
                 print(f"Failed to delete {f_path}. Reason: {e}")
-
     os.makedirs(tmp_dir, exist_ok=True)
 
-    # Save video
-    video_path = os.path.join(tmp_dir, "recording.mp4")
-    with open(video_path, "wb") as f:
+    # Save temporary WEBM video
+    webm_path = os.path.join(tmp_dir, "recording.webm")
+    with open(webm_path, "wb") as f:
         f.write(file.read())
-    print(f"Video saved at: {video_path}")
+    print(f"WEBM video saved at: {webm_path}")
+
+    # Convert WEBM video to MP4 using ffmpeg subprocess
+    mp4_path = os.path.join(tmp_dir, "recording.mp4")
+    try:
+        subprocess.run([
+            "ffmpeg", "-y", "-i", webm_path,
+            "-c:v", "libx264", "-c:a", "aac", "-pix_fmt", "yuv420p",
+            mp4_path
+        ], check=True)
+        print(f"Converted video saved at: {mp4_path}")
+    except subprocess.CalledProcessError as e:
+        print(f"Failed to convert WebM to MP4: {e}")
+        return {"error": f"Video conversion failed: {e}"}, 500
+    finally:
+        # Optional: remove the temporary WEBM file
+        if os.path.exists(webm_path):
+            os.remove(webm_path)
 
     # Save keyboard-video correspondence
     try:
         keyboard_data = json.loads(keyboard_json_str)
-        # Optional: validate that keys exist
         if "input_text" not in keyboard_data or "video_timestamps" not in keyboard_data:
             raise ValueError("keyboard_video JSON must contain 'input_text' and 'video_timestamps'")
         json_path = os.path.join(tmp_dir, "keyboard_video.json")
@@ -124,7 +178,9 @@ def upload_keyboard_video(request):
         print(f"Failed to save keyboard-video JSON: {e}")
         return {"error": f"Invalid keyboard-video JSON: {e}"}, 400
 
-    return {"message": "Video and keyboard-video correspondence saved successfully"}, 200
+    global CURRENT_RECORDING_FORMAT
+    CURRENT_RECORDING_FORMAT = 'video'
+    return {"message": "Video converted to MP4 and keyboard-video correspondence saved successfully"}, 200
 
 def transcribe(request):
     if not CURRENT_RECORDING_FORMAT:
@@ -149,7 +205,7 @@ def transcribe(request):
         return {"segments": segmentations}, 200
 
     elif CURRENT_RECORDING_FORMAT == "video":
-        segmentations = audio_transcribe("tmp/recording.mp4")
+        segmentations = audio_transcribe("tmp/recording.webm")
 
         with open("tmp/transcription.json", "w") as f:
             json.dump(segmentations, f, indent=2)
@@ -158,44 +214,105 @@ def transcribe(request):
         clear_dir("tmp/video_segments")
         for i, seg in enumerate(segmentations):
             start, end = seg["interval"]
-            save_video_segment("tmp/recording.mp4", start, end, f"tmp/video_segments/{i}.mp4")
+            save_video_segment("tmp/recording.webm", start, end, f"tmp/video_segments/{i}.mp4")
 
         return {"segments": segmentations}, 200
 
+# def transcribe_keyboard_video_input(request):
+#     keyboard_file = "tmp/keyboard_video.json"
+#     video_file = "tmp/recording.mp4"
+#     output_json = "tmp/transcription.json"
+#     segment_folder = "tmp/video_segments"
+
+#     # Ensure segment folder exists and is empty
+#     if os.path.exists(segment_folder):
+#         for f in os.listdir(segment_folder):
+#             os.remove(os.path.join(segment_folder, f))
+#     else:
+#         os.makedirs(segment_folder)
+
+#     # Load keyboard-video JSON
+#     try:
+#         with open(keyboard_file, "r", encoding="utf-8") as f:
+#             data = json.load(f)
+#     except Exception as e:
+#         return {"error": f"Failed to read {keyboard_file}: {e}"}, 400
+
+#     input_text = data.get("input_text", "")
+#     video_timestamps = data.get("video_timestamps", [])
+
+#     # Validate lengths
+#     if len(input_text) != len(video_timestamps):
+#         return {"error": "Length of video_timestamps does not match input_text"}, 400
+
+#     # Generate sentence intervals
+#     try:
+#         intervals = tokenized_intervals(input_text, video_timestamps)
+#     except Exception as e:
+#         return {"error": f"Failed during tokenization: {e}"}, 500
+
+#     # Build segment JSON
+#     sentences = sent_tokenize(input_text)
+#     segmentations = []
+#     for idx, (sentence, (start_ts, end_ts)) in enumerate(zip(sentences, intervals)):
+#         segmentations.append({
+#             "text": sentence,
+#             "interval": [start_ts, end_ts]
+#         })
+#         # Trim video segment
+#         save_video_segment(video_file, start_ts, end_ts, os.path.join(segment_folder, f"{idx}.mp4"))
+
+#     # Save transcription JSON
+#     with open(output_json, "w", encoding="utf-8") as f:
+#         json.dump(segmentations, f, indent=2)
+
+#     return {"segments": segmentations}, 200
+
 def transcribe_keyboard_video_input(request):
+    start_total = time.time()
+
     keyboard_file = "tmp/keyboard_video.json"
     video_file = "tmp/recording.mp4"
     output_json = "tmp/transcription.json"
     segment_folder = "tmp/video_segments"
 
     # Ensure segment folder exists and is empty
+    start = time.time()
     if os.path.exists(segment_folder):
         for f in os.listdir(segment_folder):
             os.remove(os.path.join(segment_folder, f))
     else:
         os.makedirs(segment_folder)
+    print(f"Segment folder setup time: {time.time() - start:.3f}s")
 
     # Load keyboard-video JSON
+    start = time.time()
     try:
         with open(keyboard_file, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as e:
         return {"error": f"Failed to read {keyboard_file}: {e}"}, 400
+    print(f"Loading JSON time: {time.time() - start:.3f}s")
 
     input_text = data.get("input_text", "")
     video_timestamps = data.get("video_timestamps", [])
 
     # Validate lengths
+    start = time.time()
     if len(input_text) != len(video_timestamps):
         return {"error": "Length of video_timestamps does not match input_text"}, 400
+    print(f"Validation time: {time.time() - start:.3f}s")
 
     # Generate sentence intervals
+    start = time.time()
     try:
         intervals = tokenized_intervals(input_text, video_timestamps)
     except Exception as e:
         return {"error": f"Failed during tokenization: {e}"}, 500
+    print(f"Tokenized intervals time: {time.time() - start:.3f}s")
 
     # Build segment JSON
+    start = time.time()
     sentences = sent_tokenize(input_text)
     segmentations = []
     for idx, (sentence, (start_ts, end_ts)) in enumerate(zip(sentences, intervals)):
@@ -205,36 +322,52 @@ def transcribe_keyboard_video_input(request):
         })
         # Trim video segment
         save_video_segment(video_file, start_ts, end_ts, os.path.join(segment_folder, f"{idx}.mp4"))
+    print(f"Segment processing time: {time.time() - start:.3f}s")
 
     # Save transcription JSON
+    start = time.time()
     with open(output_json, "w", encoding="utf-8") as f:
         json.dump(segmentations, f, indent=2)
+    print(f"Saving JSON time: {time.time() - start:.3f}s")
 
+    print(f"Total elapsed time: {time.time() - start_total:.3f}s")
     return {"segments": segmentations}, 200
 
 def emotion_from_video(request):
+    start_total = time.time()
+
     if CURRENT_RECORDING_FORMAT != 'video':
         print("Emotion from video not supported!")
         return {"error": "Error: Emotion from video not supported!"}, 400
 
+    # Load transcription JSON
+    start = time.time()
     transcription_json_path = "tmp/transcription.json"
     with open(transcription_json_path, "r") as f:
         segmentations = json.load(f)
+    print(f"Loading transcription JSON time: {time.time() - start:.3f}s")
 
     all_frames = []  # will store all sampled frames
     frames_per_segment = []  # track how many frames belong to each segment
 
     # Step 1: sample frames from all segments
+    start = time.time()
     for i, seg in enumerate(segmentations):
         video_path = os.path.join("tmp/video_segments", f"{i}.mp4")
+        seg_start = time.time()
         frames = sample_frames(video_path, FACIAL_SAMPLES_COUNT)
+        print(f"Segment {i} frame sampling time: {time.time() - seg_start:.3f}s")
         all_frames.extend(frames)
         frames_per_segment.append(len(frames))
+    print(f"Total frame sampling time: {time.time() - start:.3f}s")
 
     # Step 2: run batch facial emotion classification for all frames at once
+    start = time.time()
     batch_predictions = facial_emotion_classification_batch(all_frames)
+    print(f"Facial emotion batch classification time: {time.time() - start:.3f}s")
 
     # Step 3: distribute predictions back to each segment and vote
+    start = time.time()
     segment_emotions = []
     idx = 0  # pointer in batch_predictions
     for frame_count in frames_per_segment:
@@ -252,11 +385,15 @@ def emotion_from_video(request):
 
         voted_emotion = max(agg_scores, key=agg_scores.get)
         segment_emotions.append({"facial": voted_emotion})
+    print(f"Aggregating predictions and voting time: {time.time() - start:.3f}s")
 
     # Step 4: save results
+    start = time.time()
     with open("tmp/segment_emotions.json", "w") as f:
         json.dump(segment_emotions, f, indent=2)
+    print(f"Saving results JSON time: {time.time() - start:.3f}s")
 
+    print(f"Total elapsed time: {time.time() - start_total:.3f}s")
     return {"segment_emotions": segment_emotions}, 200
 
 
@@ -331,15 +468,16 @@ def merge_emotions_with_LLM(request):
                     emotional information from the full speech, they are not necessaryly accurate (and for most cases not). YOU would have to \
                     analyse these evaluations and ALONG WITH THE TEXT, make your own evaluation on the emotions. You have to refill the \
                     brackets [] with the your evaluations. You may choose from \
-                    ['angry', 'calm', 'disgust', 'fearful', 'happy', 'neutral', 'sad', 'surprised']. Also, don't have any indicators like \
-                    facial or audio when you return your responce (Just one plain [<emotion>] in the middle of both brackets) and remember to keep the original transcript - YOU ARE ONLY EDITING THE BRACKETS. ONE EMOTION PER BRACKET. Sometimes, you \
+                    ['angry', 'calm', 'disgust', 'fearful', 'happy', 'neutral', 'sad', 'surprised']. Also, do NOT have any indicators like \
+                    facial or audio when you return your responce (Just one plain [<emotion>] in the middle of both brackets, stuffs like [facial: happy] is NOT ALLOWED) and remember to keep the original transcript - YOU ARE ONLY EDITING THE BRACKETS. ONE EMOTION PER BRACKET. LEAVE THE TRANSCRIPT VISIBLE. Sometimes, you \
                     might encounter empty brackets. These are cases where emotional detections are not avaliable. You have to evaluate the \
                     emotion solely upon the text. The annotated transcript will be provided."
                 },
                 {
                     "role": "user",
                     "content": f"Here is an annotated transcript '{annotated_transcript}'. In your response, please ONLY provide your version \
-                    of the annotation along with the transcript, NO ADDTIONAL CONTENTS ARE ALLOWED!!!"
+                    of the annotation along with the transcript, NO ADDTIONAL CONTENTS ARE ALLOWED!!! ALSO, always put the annotation at the \
+                    end of the segments"
                 },
     ]
 
@@ -374,6 +512,93 @@ def merge_emotions_with_LLM(request):
     return {"Anotated Transcript": assistant_content}, 200
 
 
+def annotate_pure_text(request):
+    prompt = request.form.get("text_input")
+    if not prompt:
+        print("No text input.")
+        return {"error": "No text input."}, 400
+    
+    messages = [{"role": "system", "content": "You will be provided with a transcript from a speech or monologue. Your task is to first segment the script into several segments and identify where the emotional tone of the speaker changes. At those locations, you would have to annotate your infered emotion in square brackets, like ...<here is some text segments> [<an emotion>]... You may choose from ['angry', 'calm', 'disgust', 'fearful', 'happy', 'neutral', 'sad', 'surprised']. Remember to keep the original transcript - YOU ARE ONLY ADDING THE BRACKETS. ONE EMOTION PER BRACKET. The annotated transcript will be provided."}, {"role": "user", "content": f"Here is a transcript '{prompt}'. In your response, please ONLY provide your version of the annotation along with the transcript, NO ADDTIONAL CONTENTS ARE ALLOWED!!!"}]
+
+    response = ollama.chat(
+        model=model,
+        messages=messages
+    )
+    
+    assistant_content = dict(response['message'])['content']
+    return {"Anotated Transcript": assistant_content}, 200
+
+
+
+def generate_11labs_voice(request):
+    if 'file' not in request.files:
+        print("No voice sample included!")
+        return {"error": "No voice sample included!"}, 400
+
+    file = request.files['file']
+
+    tmp_dir = "tmp_11labs"
+    # Clear tmp directory before saving new file
+    if os.path.exists(tmp_dir):
+        for f in os.listdir(tmp_dir):
+            f_path = os.path.join(tmp_dir, f)
+            try:
+                if os.path.isfile(f_path) or os.path.islink(f_path):
+                    os.unlink(f_path)
+                elif os.path.isdir(f_path):
+                    shutil.rmtree(f_path)
+            except Exception as e:
+                print(f"Failed to delete {f_path}. Reason: {e}")
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    # Handle audio/webm
+    if file.content_type == "audio/mpeg":
+        tmp_webm_path = os.path.join(tmp_dir, "sample.webm")
+        with open(tmp_webm_path, "wb") as f:
+            f.write(file.read())
+            
+        voice_id = create_voice("tmp_11labs/sample.webm")
+
+        return {"voice_id": voice_id}, 200
+
+    else:
+        CURRENT_RECORDING_FORMAT = False
+        print(f"Error: Unsupported file format: {file.content_type}")
+        return {"error": f"Unsupported file format: {file.content_type}"}, 400
+
+def generate_11labs_text_to_speech(request):
+    
+    text = request.form.get('text')
+    voice_id = request.form.get('voice_id')
+    audio_id = request.form.get('audio_id')
+    user_id = request.form.get('user_id')
+
+    messages = [{"role": "user", "content": "You will be given a annotated transcript. Please extract the texts from it and apply any of the following tags at anywhere appropriate: [excited], [nervous], [frustrated], [sorrowful], [calm], [sigh], [laughs], [gulps], [gasps], [whispers], [pauses], [hesitates], [stammers], [resigned tone], [cheerfully], [flatly], [deadpan], [playfully]. Note, some of the emotions does not exist. Use only tags that are provided" + f"Here is an annotated transcript '{text}'. In your response, please ONLY provide your version of the tagged speech, NO ADDTIONAL CONTENTS ARE ALLOWED!!!"}]
+
+    response = ollama.chat(
+        model=model,
+        messages=messages
+    )
+
+    print(f"generated_audio/{user_id}/{audio_id}")
+
+
+    assistant_content = dict(response['message'])['content']
+    print(assistant_content)
+    text_to_speech(voice_id, assistant_content, "tmp_11labs/output.mp3")
+
+    # Upload to Supabase
+    with open("tmp_11labs/output.mp3", "rb") as f:
+        print(f"generated_audio/{user_id}/{audio_id}")
+        supabase.storage.from_("media").upload(
+            f"generated_audio/{user_id}/{audio_id}",
+            f,
+            file_options={"content-type": "audio/mpeg"}
+        )
+
+    
+    return {"voice_id": voice_id}, 200
+
 
 
 def inference_from_prompt(request):
@@ -402,7 +627,7 @@ def inference_from_prompt(request):
     
 
 
-function_list = [upload_recording, upload_keyboard_video, transcribe, transcribe_keyboard_video_input, emotion_from_video, emotion_from_audio, merge_emotions_with_LLM]
+function_list = [upload_recording, upload_keyboard_video, transcribe, transcribe_keyboard_video_input, emotion_from_video, emotion_from_audio, merge_emotions_with_LLM, annotate_pure_text, generate_11labs_voice, generate_11labs_text_to_speech]
 
 
 @app.route("/upload", methods=["POST"])
@@ -424,32 +649,32 @@ def upload_content():
         return jsonify({"error": f"Unknown command '{command}'"}), 400
 
     # Set busy, run function synchronously, then set idle
-    server_status["busy"] = True
-    try:
-        # Capture the function's return value
-        func_response = function_list[cmd_index](request)  # always (dict, status)
-        if isinstance(func_response, tuple) and len(func_response) == 2:
-            data, status_code = func_response
-            return jsonify(data), status_code
-        else:
-            return jsonify(func_response), 200
-    except Exception as e:
-        server_status["busy"] = False
-        return jsonify({"error": f"Function execution failed: {e}"}), 500
-    finally:
-        server_status["busy"] = False
+    # server_status["busy"] = True
+    # try:
+    #     # Capture the function's return value
+    #     func_response = function_list[cmd_index](request)  # always (dict, status)
+    #     if isinstance(func_response, tuple) and len(func_response) == 2:
+    #         data, status_code = func_response
+    #         return jsonify(data), status_code
+    #     else:
+    #         return jsonify(func_response), 200
+    # except Exception as e:
+    #     server_status["busy"] = False
+    #     return jsonify({"error": f"Function execution failed: {e}"}), 500
+    # finally:
+    #     server_status["busy"] = False
 
      
     # Capture the function's return value
-    # server_status["busy"] = False
-    # func_response = function_list[cmd_index](request)  # always (dict, status)
-    # if isinstance(func_response, tuple) and len(func_response) == 2:
-    #     data, status_code = func_response
-    #     return jsonify(data), status_code
-    # else:
-    #     return jsonify(func_response), 200
+    server_status["busy"] = False
+    func_response = function_list[cmd_index](request)  # always (dict, status)
+    if isinstance(func_response, tuple) and len(func_response) == 2:
+        data, status_code = func_response
+        return jsonify(data), status_code
+    else:
+        return jsonify(func_response), 200
 
-    # server_status["busy"] = False
+    server_status["busy"] = False
 
 
     
